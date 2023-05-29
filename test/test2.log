@@ -1,0 +1,2 @@
+timestamp=2023-05-26T13:14:22Z level=info msg="Test log message" user=dar
+timestamp=2023-05-26T13:15:22Z level=error msg="Error occurred" user=ming

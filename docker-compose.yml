@@ -1,0 +1,143 @@
+version: '3'
+services:
+
+# nginx-1
+  nginx-1:
+    container_name: nginx-1
+    image: nginx:latest
+    ports:
+      - 80:80
+    volumes:
+      - ./nginx/conf/defaut.conf:/etc/nginx/conf.d/default.conf
+      - ./nginx/conf/nginx.conf:/etc/nginx/nginx.conf
+
+# telegraf node 1 Log for Loki
+  telegraf-loki:
+    container_name: telegraf-loki
+    image: telegraf:1.26.3
+    # build: telegraf
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./test:/var/log/test # test input file
+      - ./telegraf/conf/telegraf.loki.conf:/etc/telegraf/telegraf.conf
+      - ./log.out:/tmp/log.out
+    depends_on:
+      - nginx-1
+      - loki
+
+# telegraf node 2 Metrics for Victoriametrics
+  telegraf-vm:
+    container_name: telegraf-vm
+    image: telegraf:1.26.3
+    # build: telegraf
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./test:/var/log/test # test input file
+      - ./telegraf/conf/telegraf.vm.conf:/etc/telegraf/telegraf.conf
+      - ./log.out:/tmp/log.out
+    depends_on:
+      - nginx-1
+      - victoriametrics
+
+# loki
+  loki:
+    container_name: loki
+    image: grafana/loki:2.8.2
+    ports:
+      - 3100:3100
+    volumes:
+      - loki-data:/loki
+    command: -config.file=/etc/loki/local-config.yaml    
+
+# victoriametrics
+  victoriametrics:
+    container_name: victoriametrics
+    image: victoriametrics/victoria-metrics:v1.91.0
+    ports:
+      - 8428:8428
+    volumes:
+      - victoriametrics_data:/victoria-metrics-data
+    command: 
+      - "--storageDataPath=/victoria-metrics-data"
+      - "--graphiteListenAddr=:2003"
+      - "--opentsdbListenAddr=:4242"
+      - "--httpListenAddr=:8428"
+      - "--influxListenAddr=:8089"
+      - "--vmalert.proxyURL=http://vmalert:8880"
+
+# grafana
+  grafana:
+    container_name: grafana
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      # - ./provisioning/:/etc/grafana/provisioning/
+      # - ./../../dashboards/victoriametrics.json:/var/lib/grafana/dashboards/vm.json
+      # - ./../../dashboards/vmagent.json:/var/lib/grafana/dashboards/vmagent.json
+      # - ./../../dashboards/vmalert.json:/var/lib/grafana/dashboards/vmalert.json      
+    depends_on:
+      - "victoriametrics"
+    entrypoint:
+      - sh
+      - -euc
+      - |
+        mkdir -p /etc/grafana/provisioning/datasources
+        cat <<EOF > /etc/grafana/provisioning/datasources/ds.yaml
+        apiVersion: 1
+        datasources:
+        - name: Loki
+          type: loki
+          access: proxy 
+          orgId: 1
+          url: http://loki:3100
+          basicAuth: false
+          isDefault: true
+          version: 1
+          editable: false
+        EOF
+        /run.sh
+
+  vmalert:
+    container_name: vmalert
+    image: victoriametrics/vmalert:v1.91.0
+    depends_on:
+      - "victoriametrics"
+      - "alertmanager"
+    ports:
+      - 8880:8880
+    volumes:
+      - ./alert/alerts.yml:/etc/alerts/alerts.yml
+      - ./alert/alerts-health.yml:/etc/alerts/alerts-health.yml
+      - ./alert/alerts-vmagent.yml:/etc/alerts/alerts-vmagent.yml
+      - ./alert/alerts-vmalert.yml:/etc/alerts/alerts-vmalert.yml
+    command:
+      - "--datasource.url=http://victoriametrics:8428/"
+      - "--remoteRead.url=http://victoriametrics:8428/"
+      - "--remoteWrite.url=http://victoriametrics:8428/"
+      - "--notifier.url=http://alertmanager:9093/"
+      - "--rule=/etc/alerts/*.yml"
+      # display source of alerts in grafana
+      - "--external.url=http://grafana:3000" #grafana outside container
+      # when copypaste the line be aware of '$$' for escaping in '$expr'
+      - '--external.alert.source=explore?orgId=1&left={"datasource":"VictoriaMetrics","queries":[{"expr":{{$$expr|jsonEscape|queryEscape}},"refId":"A"}],"range":{"from":"now-1h","to":"now"}}'
+
+  alertmanager:
+    container_name: alertmanager
+    image: prom/alertmanager:v0.25.0
+    volumes:
+      - ./alert/alertmanager.yml:/config/alertmanager.yml
+    command:
+      - "--config.file=/config/alertmanager.yml"
+    ports:
+      - 9093:9093
+
+volumes:
+  loki-data:
+  victoriametrics_data:
+  grafana-data:
